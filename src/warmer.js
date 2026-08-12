@@ -28,6 +28,7 @@ export class Warmer {
     apiKey = null,
     model = 'haiku',
     prompt = 'hi',
+    staggered = false,
     spawnFn = defaultSpawn,
     timeoutMs = 120_000,
     log = console.log,
@@ -38,6 +39,7 @@ export class Warmer {
     this.apiKey = apiKey;
     this.model = model;
     this.prompt = prompt;
+    this.staggered = staggered;
     this.spawnFn = spawnFn;
     this.timeoutMs = timeoutMs;
     this.log = log;
@@ -110,9 +112,9 @@ export class Warmer {
     this.lastRunStartedAt = Date.now();
     this.nextRunAt = this.intervalMs > 0 ? this.lastRunStartedAt + this.intervalMs : null;
     try {
-      const targets = this.am.accounts.filter(account => this._isWarmTarget(account));
-      for (const account of targets) {
-        if (abort.signal.aborted) break; // stopped mid-sweep (shutdown / warmup off)
+      const targets = this.warmTargets();
+      for (const account of this.staggered ? targets.slice(0, 1) : targets) {
+        if (abort.signal.aborted) break;
         await this.warmAccount(account, abort.signal);
       }
     } finally {
@@ -120,6 +122,14 @@ export class Warmer {
       this._running = false;
       if (this._abort === abort) this._abort = null;
     }
+  }
+
+  warmTargets() {
+    return this.am.accounts.filter(account => this._isWarmTarget(account)).sort((a, b) => {
+      const aWarmed = this.accountStatus.get(a.name)?.finishedAt || 0;
+      const bWarmed = this.accountStatus.get(b.name)?.finishedAt || 0;
+      return aWarmed - bWarmed || this.am.flexibility(b) - this.am.flexibility(a) || a.index - b.index;
+    });
   }
 
   async warmAccount(account, signal) {
@@ -171,6 +181,7 @@ export class Warmer {
   getStatus() {
     return {
       enabled: this.intervalMs > 0,
+      staggered: this.staggered,
       intervalSeconds: Math.round(this.intervalMs / 1000),
       running: this._running,
       lastRunStartedAt: iso(this.lastRunStartedAt),

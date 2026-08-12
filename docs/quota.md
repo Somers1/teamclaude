@@ -29,12 +29,15 @@ The probe is also the only source for the **Sonnet 7-day** bucket, when your pla
 The rolling **5-hour session window** only starts once an account sends a real message. So when your active account runs out and rotation moves to a cold account, that account's 5h window starts *then* — right when you need its full headroom. Keep-warm ([#76](https://github.com/KarpelesLab/teamclaude/issues/76)) starts the timer on idle accounts ahead of time, so the next account is already partway (or fully) through a fresh window when it's needed.
 
 ```bash
-teamclaude warmup 600    # warm idle accounts every 600s
-teamclaude warmup off    # disabled (default)
-teamclaude warmup        # show current setting
+teamclaude warmup 600            # warm every idle account every 600s
+teamclaude warmup stagger 9000   # warm one idle account every 2.5 hours
+teamclaude warmup off            # disabled (default)
+teamclaude warmup                # show current setting
 ```
 
-> ⚠️ **This spends a little quota — unlike the passive quota probe.** The 5h timer can't be started by a read-only call, so keep-warm sends a real (minimal) message: for each eligible idle account it spawns a one-shot `claude -p --bare --model haiku --output-format text "hi"` pointed at this proxy, pinned to that account. It only warms accounts whose 5h window is **not already running**, skips disabled/throttled/errored and third-party-backend accounts, and uses the cheapest model — but it does consume a few tokens and a slice of the 5h/weekly buckets per account per window. Requires the `claude` CLI on `PATH`. Minimum interval 60s; changes apply live. Status shows under `warm` in `teamclaude status --json`.
+Staggered mode starts only one idle account per interval. It starts the most flexible account first, then the account that has waited longest. For three accounts, `teamclaude warmup stagger 9000` places new five-hour windows about 2.5 hours apart. Use `18000` if you really want five hours between starts, but that takes ten hours to start all three and leaves wider gaps with no warm account. The scheduler never restarts a five-hour window that is already running.
+
+> ⚠️ **This spends a little quota — unlike the passive quota probe.** The 5h timer can't be started by a read-only call, so keep-warm sends a real (minimal) message: it spawns a one-shot `claude -p --bare --model haiku --output-format text "hi"` pointed at this proxy, pinned to the selected account. It skips disabled/throttled/errored and third-party-backend accounts and uses the cheapest model, but consumes a few tokens and a slice of the 5h/weekly buckets. Requires the `claude` CLI on `PATH`. Minimum interval is 60 seconds and changes apply live.
 
 Keep-warm has nothing to do with the prompt cache — see [Prompt caching across rotation](routing.md#prompt-caching-across-rotation).
 

@@ -17,6 +17,9 @@ Node.js 20+ required.
 
 ```bash
 npm install -g @karpeleslab/teamclaude
+# Fork with flexibility routing and staggered warm-up:
+# npm uninstall -g @karpeleslab/teamclaude
+# npm install -g github:Somers1/teamclaude
 
 teamclaude login     # browser OAuth, run it once per account
 teamclaude server    # start the proxy, shows the TUI
@@ -27,8 +30,8 @@ Already logged into Claude Code? `teamclaude import` takes its credentials inste
 
 ## What it does
 
-- Rotates to the next account when the 5h session or 7d weekly bucket reaches the threshold (98% by default), preferring the account whose weekly quota resets soonest.
-- Tracks the per-model weekly cap separately, so an account out of Fable quota is skipped for Fable requests and still serves Opus and Sonnet.
+- Rotates by quota at 98% by default, using less flexible accounts first and then the account whose weekly quota resets soonest.
+- Tracks per-model weekly caps separately, so Opus spends Fable-exhausted accounts before consuming the only account that still has Fable headroom.
 - Tells a spent quota bucket apart from a per-minute rate limit and only rotates on the first one. Rotating on a rate limit would just move the burst to the next account and drop the warm cache, so it paces the same account instead.
 - Paces requests onto a freshly switched account, so a herd of agents failing over at the same instant doesn't throttle it and cascade down the fleet.
 - TUI with quota bars, reset countdowns, activity log, and settings you can change while it runs, including adding and removing accounts.
@@ -81,7 +84,7 @@ Step-by-step lifecycle: [docs/routing.md](docs/routing.md#request-lifecycle).
 
 ## Security
 
-The only canonical sources for TeamClaude are this repository (https://github.com/KarpelesLab/teamclaude) and the [`@karpeleslab/teamclaude`](https://www.npmjs.com/package/@karpeleslab/teamclaude) npm package. TeamClaude is **never** distributed as a downloadable binary archive, so be wary of soft-forks that bundle a `.zip` and tell you to extract and run it. See [SECURITY.md](SECURITY.md) for details and how to report issues.
+This is the `Somers1/teamclaude` fork of KarpelesLab's TeamClaude. Install this fork directly from GitHub. It is not the canonical upstream package and is not published as a downloadable binary archive. See [SECURITY.md](SECURITY.md) before trusting another copy.
 
 ## Compliance
 

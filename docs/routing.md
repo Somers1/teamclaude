@@ -16,9 +16,9 @@ How TeamClaude decides which account serves a request, and what it does when tha
 
 ## Choosing an account
 
-TeamClaude prefers to keep you on one account. It stays on the current one and only rotates when that account nears `switchThreshold` (default `0.98`).
+TeamClaude stays on the current account while it remains the best choice. A higher-priority account or an equally ranked account with less spare model-family capacity can take over before the current account reaches `switchThreshold` (default `0.98`).
 
-When it does have to pick, ranking is: lowest `priority` number first, then, among accounts of equal priority, the one whose governing weekly bucket resets soonest. Spending the account closest to its refresh preserves the ones whose window resets further out. A model with its own weekly bucket (Fable, Sonnet) is ranked by that bucket rather than the shared one. Set an explicit order with `teamclaude priority <name> <n>`, or `--first` / `--last`.
+Ranking is: lowest `priority` number first, then least flexibility, then the governing weekly bucket that resets soonest. Flexibility is the number of other model-family buckets the account can still serve. This spends less flexible accounts first: an account with no Fable quota left serves Opus before an account that can still serve both Opus and Fable. The more flexible account remains a fallback if the preferred accounts become unavailable. A model with its own weekly bucket (Fable, Sonnet) is ranked by that bucket rather than the shared one. Set an explicit order with `teamclaude priority <name> <n>`, or `--first` / `--last`.
 
 ## The two kinds of 429
 

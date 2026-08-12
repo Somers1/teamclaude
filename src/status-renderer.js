@@ -208,6 +208,7 @@ function gradientColor(index, width) {
 function formatProbeSummary(probe, now, paint) {
   if (!probe.enabled) return paint.gray('off (passive only)');
   const bits = [`on every ${formatDuration((probe.intervalSeconds || 0) * 1000)}`];
+  if (probe.staggered) bits.push('one account at a time');
   if (probe.running) bits.push(paint.yellow('running'));
   const last = parseTs(probe.lastRunFinishedAt);
   if (last) bits.push(`last ${formatAgo(last, now)}`);

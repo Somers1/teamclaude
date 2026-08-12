@@ -1,6 +1,6 @@
 import { refreshAccessToken, isTokenExpiringSoon, isTokenExpired } from './oauth.js';
 import { sameIdentity } from './identity.js';
-import { weeklyBucketForModel, modelGlobMatches } from './model.js';
+import { FAMILY_WEEKLY_BUCKETS, weeklyBucketForModel, modelGlobMatches } from './model.js';
 import { SessionTracker } from './session-tracker.js';
 
 // Re-exported for callers that import these model helpers from here.
@@ -291,8 +291,9 @@ export class AccountManager {
       // healthy current one. Within the same priority tier we stay put, so the
       // common case (all accounts at the default priority 0) is unchanged and
       // never thrashes — preemption only triggers when priorities differ.
-      const betterExists = this.accounts.some(a =>
-        this._isAvailable(a, model, advisorModel) && !exclude?.has(a.index) && (a.priority || 0) < (current.priority || 0));
+      const betterExists = this.accounts.some(account =>
+        this._isAvailable(account, model, advisorModel) && !exclude?.has(account.index)
+        && this.outranks(account, current, model, advisorModel));
       return betterExists ? this._selectNext(exclude, model, advisorModel) : current;
     }
     const next = this._selectNext(exclude, model, advisorModel);
@@ -318,8 +319,9 @@ export class AccountManager {
       if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinIdx)) {
         // Mirror _select's priority preemption so an operator's priority order
         // still wins over a session's stickiness.
-        const betterExists = this.accounts.some(a =>
-          this._isAvailable(a, model, advisorModel) && !exclude?.has(a.index) && (a.priority || 0) < (pinned.priority || 0));
+        const betterExists = this.accounts.some(account =>
+          this._isAvailable(account, model, advisorModel) && !exclude?.has(account.index)
+          && this.outranks(account, pinned, model, advisorModel));
         if (!betterExists) return pinned;
       }
     }
@@ -334,6 +336,7 @@ export class AccountManager {
     const now = Date.now();
     let best = null;
     let bestPriority = Infinity;
+    let bestFlexibility = Infinity;
     let bestSessions = Infinity;
     let bestInFlight = Infinity;
     let bestReset = Infinity;
@@ -341,15 +344,18 @@ export class AccountManager {
       if (exclude?.has(account.index)) continue;
       if (!this._isAvailable(account, model, advisorModel)) continue;
       const priority = account.priority || 0;
+      const flexibility = this.flexibility(account, model, advisorModel);
       const sessions = this.sessionTracker.activeCountFor(account.index, now);
       const inFlight = account.inFlight || 0;
       const reset = this._governingWeeklyReset(account, model) || -Infinity;
       if (priority < bestPriority
-        || (priority === bestPriority && sessions < bestSessions)
-        || (priority === bestPriority && sessions === bestSessions && inFlight < bestInFlight)
-        || (priority === bestPriority && sessions === bestSessions && inFlight === bestInFlight && reset < bestReset)) {
+        || (priority === bestPriority && flexibility < bestFlexibility)
+        || (priority === bestPriority && flexibility === bestFlexibility && sessions < bestSessions)
+        || (priority === bestPriority && flexibility === bestFlexibility && sessions === bestSessions && inFlight < bestInFlight)
+        || (priority === bestPriority && flexibility === bestFlexibility && sessions === bestSessions && inFlight === bestInFlight && reset < bestReset)) {
         best = account;
         bestPriority = priority;
+        bestFlexibility = flexibility;
         bestSessions = sessions;
         bestInFlight = inFlight;
         bestReset = reset;
@@ -413,8 +419,8 @@ export class AccountManager {
     if (current && this._isAvailable(current, model)) {
       // Mirror getActiveAccount's priority preemption: a strictly higher-priority
       // available account wins over a healthy current one; same tier stays put.
-      const better = this.accounts.some(a =>
-        this._isAvailable(a, model) && (a.priority || 0) < (current.priority || 0));
+      const better = this.accounts.some(account =>
+        this._isAvailable(account, model) && this.outranks(account, current, model));
       if (!better) return current.index;
     }
     const best = this._pickBestAvailable(null, model);
@@ -439,6 +445,20 @@ export class AccountManager {
       return Date.now() >= (account.throttledAt || 0) + this.throttleProbeFloorMs;
     }
     return true;
+  }
+
+  flexibility(account, model = null, advisorModel = null) {
+    const governing = new Set([this._weeklyBucketFor(model)]);
+    if (advisorModel) governing.add(this._weeklyBucketFor(advisorModel));
+    return Object.values(FAMILY_WEEKLY_BUCKETS).filter(bucket =>
+      !governing.has(bucket) && account.quota[bucket] != null && account.quota[bucket] < this.switchThreshold).length;
+  }
+
+  outranks(account, current, model = null, advisorModel = null) {
+    const priority = account.priority || 0;
+    const currentPriority = current.priority || 0;
+    return priority < currentPriority
+      || (priority === currentPriority && this.flexibility(account, model, advisorModel) < this.flexibility(current, model, advisorModel));
   }
 
   /** Highest utilization across the quota dimensions that govern `model` (0-1),
@@ -896,6 +916,7 @@ export class AccountManager {
   _pickBestAvailable(exclude = null, model = null, advisorModel = null) {
     let best = null;
     let bestPriority = Infinity;
+    let bestFlexibility = Infinity;
     let bestReset = Infinity;
 
     for (let i = 0; i < this.accounts.length; i++) {
@@ -907,14 +928,17 @@ export class AccountManager {
       if (!this._isAvailable(account, model, advisorModel)) continue;
 
       const priority = account.priority || 0;
+      const flexibility = this.flexibility(account, model, advisorModel);
       // Rank by the reset of the weekly bucket that governs THIS model (Fable and
       // Sonnet have their own), so a Fable request spends the account whose Fable
       // window refreshes soonest while preserving accounts that reset later for
       // Opus/Sonnet. Unknown reset sorts first so we probe and fill it in.
       const weeklyReset = this._governingWeeklyReset(account, model) || -Infinity;
-      if (priority < bestPriority ||
-          (priority === bestPriority && weeklyReset < bestReset)) {
+      if (priority < bestPriority
+          || (priority === bestPriority && flexibility < bestFlexibility)
+          || (priority === bestPriority && flexibility === bestFlexibility && weeklyReset < bestReset)) {
         bestPriority = priority;
+        bestFlexibility = flexibility;
         bestReset = weeklyReset;
         best = account;
       }

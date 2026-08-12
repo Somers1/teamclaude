@@ -43,7 +43,8 @@ Volatile runtime state (observed quota) is written separately to `teamclaude.sta
 | `upstream` | Upstream API base URL |
 | `switchThreshold` | Quota utilization (0–1) at which to switch accounts (TUI settings screen: **Switch threshold**) |
 | `quotaProbeSeconds` | Background [quota-probe](quota.md#quota-probe) interval in seconds (`0` = off, the default; CLI `probe`, or the **Quota probe** row on the TUI settings screen) |
-| `warmupSeconds` | [Keep-warm](quota.md#keep-warm) interval in seconds (`0` = off, the default; CLI `warmup`). Spawns a minimal `claude` per idle account to start its 5h timer — **spends a little quota**, unlike the probe |
+| `warmupSeconds` | [Keep-warm](quota.md#keep-warm) interval in seconds (`0` = off, the default; CLI `warmup`). Spawns a minimal `claude` to start 5h timers — **spends a little quota**, unlike the probe |
+| `staggerWarmup` | Warm one idle account per interval, most flexible first (`false` = warm every idle account each interval; CLI `warmup stagger <seconds>`) |
 | `holdSeconds` | Maximum seconds to [hold the connection](quota.md#hold-on-exhaustion) when all accounts are exhausted, polling silently until one recovers (`0` = return 429 immediately, the default). `teamclaude run` raises `API_TIMEOUT_MS` automatically to match |
 | `distributeSessions` | Spread concurrent Claude Code sessions across equal-priority accounts, each session pinned to one account for cache reuse (`false` = quota-driven rotation only, the default). Session tracking and readout is always on regardless — see [Session-aware routing](routing.md#session-aware-routing) |
 | `eventLogging` | How to handle Claude Code's telemetry (`/api/event_logging/*`), which is high-volume activity-log noise: `hide` (default) forwards it but keeps it out of the activity log; `block` answers `200` locally without forwarding (no upstream round-trip); `show` forwards and displays it |

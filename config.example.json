@@ -6,7 +6,9 @@
   "upstream": "https://api.anthropic.com",
   "switchThreshold": 0.98,
   "quotaProbeSeconds": 0,
-  "autoUpdate": true,
+  "warmupSeconds": 0,
+  "staggerWarmup": false,
+  "autoUpdate": false,
   "accounts": [
     {
       "name": "primary-max",

@@ -1,6 +1,6 @@
 // Opt-out-able self-update, in the spirit of Claude Code's auto-updater.
 //
-// We ONLY ever touch a global npm install (`npm install -g @karpeleslab/teamclaude`):
+// We ONLY ever touch a global npm install (`npm install -g @somers1/teamclaude`):
 //   - a git checkout (a `.git` at the package root) is a dev tree — never touched;
 //   - a local dependency / npx copy is left alone (we only notify).
 // Checks hit the npm registry at most once a day (cached in a small file next to
@@ -17,7 +17,7 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join, resolve } from 'node:path';
 import { getConfigPath } from './config.js';
 
-export const PKG_NAME = '@karpeleslab/teamclaude';
+export const PKG_NAME = '@somers1/teamclaude';
 const REGISTRY = 'https://registry.npmjs.org';
 const DAY_MS = 24 * 60 * 60 * 1000;
 

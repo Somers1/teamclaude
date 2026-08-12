@@ -273,6 +273,8 @@ async function serverCommand() {
     }
     if (warmer) {
       const ms = (diskConfig.warmupSeconds || 0) * 1000;
+      warmer.staggered = !!diskConfig.staggerWarmup;
+      config.staggerWarmup = warmer.staggered;
       if (ms !== warmer.intervalMs) {
         config.warmupSeconds = diskConfig.warmupSeconds || 0;
         warmer.reschedule(ms);
@@ -308,6 +310,7 @@ async function serverCommand() {
         if (config.switchThreshold != null) diskConfig.switchThreshold = config.switchThreshold;
         if (config.quotaProbeSeconds != null) diskConfig.quotaProbeSeconds = config.quotaProbeSeconds;
         if (config.warmupSeconds != null) diskConfig.warmupSeconds = config.warmupSeconds;
+        if (config.staggerWarmup != null) diskConfig.staggerWarmup = config.staggerWarmup;
         // Persist the route table (edited from the TUI routes screen).
         if (config.routes != null) diskConfig.routes = config.routes;
       }),
@@ -390,6 +393,7 @@ async function serverCommand() {
     },
     warm: warmer?.getStatus() || {
       enabled: false,
+      staggered: !!config.staggerWarmup,
       intervalSeconds: config.warmupSeconds || 0,
       running: false,
       accounts: accountManager.accounts.map(account => ({
@@ -465,6 +469,7 @@ async function serverCommand() {
   // /tc-acct/<index>, so needs our own port and proxy key.
   warmer = new Warmer(accountManager, {
     intervalMs: (config.warmupSeconds || 0) * 1000,
+    staggered: !!config.staggerWarmup,
     port,
     apiKey: config.proxy?.apiKey,
   });
@@ -1091,23 +1096,26 @@ async function probeCommand() {
 async function warmupCommand() {
   const config = await loadOrCreateConfig();
   const arg = args[1];
+  const staggered = arg === 'stagger';
+  const value = staggered ? args[2] : arg;
 
   if (arg === undefined) {
     const cur = config.warmupSeconds || 0;
-    console.log(cur > 0 ? `Keep-warm: every ${cur}s` : 'Keep-warm: off');
-    console.log('Set with: teamclaude warmup <off|seconds>   e.g. teamclaude warmup 600');
-    console.log('Note: warming spawns a minimal `claude` per idle account and DOES spend a little quota');
-    console.log('(unlike the passive quota probe). It only warms accounts whose 5h window is idle.');
+    const mode = config.staggerWarmup ? 'staggered' : 'all accounts';
+    console.log(cur > 0 ? `Keep-warm: every ${cur}s (${mode})` : 'Keep-warm: off');
+    console.log('Set with: teamclaude warmup <off|seconds>');
+    console.log('Stagger with: teamclaude warmup stagger <seconds>');
+    console.log('Note: warming spawns a minimal `claude` and DOES spend a little quota.');
     return;
   }
 
   let seconds;
-  if (arg === 'off' || arg === '0') {
+  if (value === 'off' || value === '0') {
     seconds = 0;
   } else {
-    seconds = parseInt(arg, 10);
+    seconds = parseInt(value, 10);
     if (Number.isNaN(seconds) || seconds < 0) {
-      console.error('Usage: teamclaude warmup <off|seconds>');
+      console.error('Usage: teamclaude warmup <off|seconds> | stagger <seconds>');
       process.exit(1);
     }
     if (seconds > 0 && seconds < 60) {
@@ -1117,9 +1125,10 @@ async function warmupCommand() {
   }
 
   config.warmupSeconds = seconds;
+  config.staggerWarmup = staggered && seconds > 0;
   await saveConfig(config);
   console.log(seconds > 0
-    ? `Keep-warm set to every ${seconds}s (spawns a minimal \`claude\` per idle account; spends a little quota).`
+    ? `Keep-warm set to every ${seconds}s (${staggered ? 'one idle account per interval' : 'all idle accounts'}; spends a little quota).`
     : 'Keep-warm disabled.');
   await notifyRunningServer(config);
 }
@@ -1388,9 +1397,9 @@ Commands:
                       (add <name> --match "<glob>" [--accounts "<name>"] [--bucket <b>])
   probe [off|secs]    Opt-in background quota refresh for idle accounts
                       (off by default; reads usage endpoint, spends no quota)
-  warmup [off|secs]   Opt-in: keep idle accounts' 5h timers running by sending
-                      a minimal claude request to each (off by default; spends
-                      a little quota, unlike probe)
+  warmup [off|secs]   Opt-in: start idle accounts' 5h timers with a minimal
+                      claude request (off by default; spends a little quota)
+  warmup stagger secs Warm one idle account per interval, most flexible first
   api <path>          Call an API endpoint with account credentials
   update              Check npm for a newer teamclaude and install it
   version             Print the installed version

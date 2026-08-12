@@ -114,7 +114,7 @@ teamclaude help              # Show all commands
 
 ## Auto-update
 
-When TeamClaude is installed globally via npm, it self-updates in the background: it checks the npm registry at most once a day, and when a newer version is published it runs `npm install -g @karpeleslab/teamclaude@latest` and applies it on the next launch. The check runs after a `teamclaude run` session ends and when a headless server starts. A git checkout is never touched — update that with `git pull`. Run `teamclaude update` to update on demand.
+Automatic updates are disabled in this fork by default so the upstream npm package cannot replace the fork. Install a newer fork revision again with `npm install -g github:Somers1/teamclaude`. A git checkout is never touched; update it with `git pull`.
 
 Disable it with `TEAMCLAUDE_DISABLE_AUTOUPDATE=1` or `"autoUpdate": false` in the config.
 

@@ -1,7 +1,7 @@
 {
-  "name": "@karpeleslab/teamclaude",
-  "version": "1.1.12",
-  "description": "Multi-account Claude proxy with automatic quota-based rotation",
+  "name": "@somers1/teamclaude",
+  "version": "1.1.12-flex.1",
+  "description": "Multi-account Claude proxy with flexibility-aware quota rotation",
   "type": "module",
   "main": "src/index.js",
   "bin": {
@@ -25,12 +25,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/KarpelesLab/teamclaude.git"
+    "url": "git+https://github.com/Somers1/teamclaude.git"
   },
   "bugs": {
-    "url": "https://github.com/KarpelesLab/teamclaude/issues"
+    "url": "https://github.com/Somers1/teamclaude/issues"
   },
-  "homepage": "https://github.com/KarpelesLab/teamclaude#readme",
+  "homepage": "https://github.com/Somers1/teamclaude#readme",
   "engines": {
     "node": ">=20.0.0"
   },

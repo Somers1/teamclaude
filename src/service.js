@@ -123,7 +123,7 @@ export function renderSystemdUnit({ node, entry, path, configPath = null }) {
   if (configPath) environment.push(`Environment=TEAMCLAUDE_CONFIG=${configPath}`);
   return `[Unit]
 Description=TeamClaude multi-account Claude proxy
-Documentation=https://github.com/KarpelesLab/teamclaude
+Documentation=https://github.com/Somers1/teamclaude
 After=network-online.target
 
 [Service]

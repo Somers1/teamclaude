@@ -26,7 +26,7 @@ export function modelFamily(model) {
 // Quota buckets on an account (see AccountManager emptyQuota). The shared 5-hour
 // bucket applies to every request; the weekly bucket depends on the family.
 // A family with no dedicated weekly bucket falls back to the shared 'unified7d'.
-const FAMILY_WEEKLY_BUCKET = {
+export const FAMILY_WEEKLY_BUCKETS = {
   fable: 'unified7dFable',
   sonnet: 'unified7dSonnet',
 };
@@ -35,7 +35,7 @@ const FAMILY_WEEKLY_BUCKET = {
 // gated by 'unified7dFable' rather than the shared 'unified7d'. Used by account
 // selection so a spent family bucket only bars that family's requests.
 export function weeklyBucketForModel(model) {
-  return FAMILY_WEEKLY_BUCKET[modelFamily(model)] || 'unified7d';
+  return FAMILY_WEEKLY_BUCKETS[modelFamily(model)] || 'unified7d';
 }
 
 // Match a shell-style glob against a model id. Only `*` is special (matches any
