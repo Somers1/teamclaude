@@ -17,6 +17,19 @@ export function orgKey(acct) {
 }
 
 /**
+ * The most qualified identity string for an account, in the same order of
+ * preference `resolveAccountPin` accepts: `accountUuid/orgUuid`, else the bare
+ * `accountUuid`, else the display name. Use it both to pin a request at an
+ * account and to key per-account records — a display name is shared by one
+ * person's several orgs, and so is a bare accountUuid, so either alone merges
+ * accounts that are not the same one.
+ */
+export function accountPin(acct) {
+  if (acct?.accountUuid && acct?.orgUuid) return `${acct.accountUuid}/${acct.orgUuid}`;
+  return acct?.accountUuid || acct?.name;
+}
+
+/**
  * Whether two account records refer to the same account+org.
  *
  * - Both have an accountUuid: it must match. If both org keys are known they

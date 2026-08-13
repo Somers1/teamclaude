@@ -303,8 +303,9 @@ export function createProxyRequestListener({ accountManager, upstream, logDir = 
       // DEPRECATED: the path-prefix pin. Superseded by TC_ACCT, which works in
       // MITM mode too (this form cannot — inside a CONNECT tunnel the path is
       // the real upstream one). Kept for the warmer and for direct API callers.
-      // One segment only, so the fully-qualified `accountUuid/orgUuid` form is
-      // not expressible here; use TC_ACCT for that.
+      // One segment only, so the fully-qualified `accountUuid/orgUuid` form has
+      // to arrive percent-encoded (`%2F`) — which is what the warmer sends, and
+      // is the only form that tells one person's several orgs apart.
       const url = req.url || '';
       const afterPrefix = url.startsWith(PIN_PREFIX) ? url.slice(PIN_PREFIX.length) : null;
       // The token runs to the next '/', which also begins the real request path.

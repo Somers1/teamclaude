@@ -20,6 +20,7 @@
 
 import { spawn } from 'node:child_process';
 import { encodePinComponent } from './claude-env.js';
+import { accountPin } from './identity.js';
 
 export class Warmer {
   constructor(accountManager, {
@@ -99,8 +100,15 @@ export class Warmer {
     if (account.upstream) return false;
     if (account.disabled) return false;
     if (account.status === 'error' || account.status === 'exhausted' || account.status === 'throttled') return false;
+    return !this._hasLiveWindow(account);
+  }
+
+  /** Whether this account's rolling 5h window is running right now — a future
+   *  reset means it is. Set by the proxy from the upstream response headers, so
+   *  it is also the only proof that a warm-up actually landed on the account. */
+  _hasLiveWindow(account) {
     const reset = account.quota?.unified5hReset;
-    return !(reset && Date.now() < reset); // a future reset ⇒ session already running
+    return !!(reset && Date.now() < reset);
   }
 
   /** Warm every eligible account once. Overlapping cycles are skipped. Sequential
@@ -126,8 +134,8 @@ export class Warmer {
 
   warmTargets() {
     return this.am.accounts.filter(account => this._isWarmTarget(account)).sort((a, b) => {
-      const aWarmed = this.accountStatus.get(a.name)?.finishedAt || 0;
-      const bWarmed = this.accountStatus.get(b.name)?.finishedAt || 0;
+      const aWarmed = this.accountStatus.get(accountPin(a))?.finishedAt || 0;
+      const bWarmed = this.accountStatus.get(accountPin(b))?.finishedAt || 0;
       return aWarmed - bWarmed || this.am.flexibility(b) - this.am.flexibility(a) || a.index - b.index;
     });
   }
@@ -139,9 +147,14 @@ export class Warmer {
       await this.am.ensureTokenFresh(account.index);
       const code = await this.spawnFn(this._spawnSpec(account, signal));
       const finishedAt = Date.now();
+      // A clean exit only says `claude` ran. Starting the 5h window is the whole
+      // point, and the proxy records it from the upstream response — so with no
+      // window running the request never reached us (e.g. a settings.json `env`
+      // base URL overriding ours) and nothing was warmed, exit code regardless.
+      const warmed = code === 0 && this._hasLiveWindow(account);
       this._record(account, {
-        status: code === 0 ? 'ok' : 'error',
-        error: code === 0 ? null : `claude exited ${code}`,
+        status: warmed ? 'ok' : 'error',
+        error: warmed ? null : (code === 0 ? 'no 5h window started — the warm-up never reached this proxy' : `claude exited ${code}`),
         startedAt, finishedAt, durationMs: finishedAt - startedAt,
       });
     } catch (err) {
@@ -157,17 +170,26 @@ export class Warmer {
   /** The `claude` invocation for one account. Pure/deterministic so tests can
    *  assert the args and env without spawning anything. */
   _spawnSpec(account, signal) {
-    // Pin by accountUuid — a stable identity. The rotation index is NOT usable:
-    // it is array position, so removing an account would repoint this at a
-    // different one. Fall back to the display name when the uuid isn't known
-    // yet (e.g. an API-key account, or before the first profile fetch).
-    const pin = encodePinComponent(account.accountUuid || account.name);
+    // Pin by account+org identity. The rotation index is NOT usable: it is array
+    // position, so removing an account would repoint this at a different one.
+    const pin = encodePinComponent(accountPin(account));
     const baseUrl = `http://127.0.0.1:${this.port}/tc-acct/${pin}`;
     return {
       command: 'claude',
       // `--bare -p`: minimal, non-interactive, auth strictly via ANTHROPIC_API_KEY
       // (which this proxy strips and replaces with the pinned account's token).
-      args: ['-p', '--bare', '--model', this.model, '--output-format', 'text', this.prompt],
+      //
+      // The base URL is ALSO passed as `--settings`, and that is what makes the
+      // pin stick: a settings-file `env` block outranks the environment we hand
+      // the child, so a user `~/.claude/settings.json` pointing at a gateway (or
+      // at this proxy without the pin) silently sends the warm-up somewhere else
+      // — it succeeds, warms whichever account rotation happens to pick, and
+      // leaves the account we meant to warm cold. Command-line settings outrank
+      // every settings file below managed policy, so the pin survives. The API
+      // key stays env-only: argv is world-readable via /proc, and a clobbered key
+      // fails loudly at the proxy's auth gate rather than misrouting.
+      args: ['--settings', JSON.stringify({ env: { ANTHROPIC_BASE_URL: baseUrl } }),
+        '-p', '--bare', '--model', this.model, '--output-format', 'text', this.prompt],
       env: {
         ...process.env,
         ANTHROPIC_BASE_URL: baseUrl,
@@ -188,7 +210,7 @@ export class Warmer {
       lastRunFinishedAt: iso(this.lastRunFinishedAt),
       nextRunAt: iso(this.nextRunAt),
       accounts: this.am.accounts.map(account => {
-        const status = this.accountStatus.get(account.name);
+        const status = this.accountStatus.get(accountPin(account));
         const applicable = account.type === 'oauth' && !account.upstream;
         return {
           name: account.name,
@@ -203,10 +225,8 @@ export class Warmer {
   }
 
   _record(account, status) {
-    this.accountStatus.set(account.name, {
-      ...(this.accountStatus.get(account.name) || {}),
-      ...status,
-    });
+    const key = accountPin(account);
+    this.accountStatus.set(key, { ...(this.accountStatus.get(key) || {}), ...status });
   }
 }
 
