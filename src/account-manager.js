@@ -357,9 +357,15 @@ export class AccountManager {
 
   /** Record that a session's request was served by an account (always on, even
    * when distribution is off — the readout is passive). This is what pins a
-   * session for future affinity. */
+   * session for future affinity — EXCEPT on a detour: a request served
+   * elsewhere while the pinned account is still generally alive was a
+   * family-bucket/route sidestep, and moving the whole session's pin for it
+   * would drag all its other traffic along too. */
   recordSession(sessionId, accountIndex) {
-    if (sessionId) this.sessionTracker.touch(sessionId, accountIndex);
+    if (!sessionId) return;
+    const pinIdx = this.sessionTracker.pinnedAccount(sessionId);
+    const detour = pinIdx != null && pinIdx !== accountIndex && this._isAvailable(this.accounts[pinIdx]);
+    this.sessionTracker.touch(sessionId, detour ? null : accountIndex);
   }
 
   /** Mark a session request as in flight / finished. Paired around the whole
@@ -870,19 +876,26 @@ export class AccountManager {
   }
 
   /**
-   * A 5h rollover is the natural rotation boundary: re-pick the default lane by
-   * the shared ranking. The account that just reset has no running clocks, so
-   * it drops to the back of the queue and the next-soonest deadline takes the
+   * A 5h rollover is the natural rotation boundary: re-pick every lane by the
+   * shared ranking. The account that just reset has no running clocks, so it
+   * drops to the back of the queue and the next-soonest deadline takes the
    * front. Pinned sessions are untouched — only new/unpinned traffic moves.
    */
   _switchOnSessionReset() {
-    const current = this.accounts[this.currentIndex];
-    const best = this._pickBest();
-    if (!best || best.index === this.currentIndex) return;
+    this._repickLane(null);
+    for (const [family, bucket] of Object.entries(FAMILY_WEEKLY_BUCKETS)) {
+      if (this.lanes.has(bucket)) this._repickLane(family);
+    }
+  }
+
+  _repickLane(model) {
+    const current = this.accounts[this._laneIndex(model)];
+    const best = this._pickBest(null, model);
+    if (!best || best.index === this._laneIndex(model)) return;
     if (current && this.outranks(current, best)) return;
-    this.currentIndex = best.index;
+    this._setLaneIndex(model, best.index);
     this._beginRamp(best);
-    console.log(`[TeamClaude] 5h window rolled over — front of the queue is now "${best.name}"`);
+    console.log(`[TeamClaude] 5h window rolled over — front of the ${model ? `${model} ` : ''}queue is now "${best.name}"`);
   }
 
   _isNearQuota(account, model = null) {
