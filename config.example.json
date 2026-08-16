@@ -5,6 +5,8 @@
   },
   "upstream": "https://api.anthropic.com",
   "switchThreshold": 0.98,
+  "distributeSessions": true,
+  "rescueHours": 24,
   "quotaProbeSeconds": 0,
   "warmupSeconds": 0,
   "staggerWarmup": false,

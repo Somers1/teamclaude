@@ -91,6 +91,11 @@ function makeAccount(acct, index) {
   };
 }
 
+function rankLess(a, b) {
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] < b[i];
+  return false;
+}
+
 // Does a declared `models` entry name `model`? The declared side may carry a
 // trailing [Nm] context-length suffix (e.g. "deepseek-v4-pro[1m]"); we match it
 // against a bare request too. Shared by _accountOwnsModel's two lookups so the
@@ -100,7 +105,7 @@ function modelMatches(declared, model) {
 }
 
 export class AccountManager {
-  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = false, sessionTracker } = {}) {
+  constructor(accounts, switchThreshold = 0.98, { refreshFn = refreshAccessToken, throttleProbeFloorMs, forcedRefreshFloorMs = FORCED_REFRESH_FLOOR_MS, routes, ramp, distributeSessions = true, sessionTracker, rescueHours = 24 } = {}) {
     // How long a just-minted token is trusted against a forced refresh.
     this._forcedRefreshFloorMs = forcedRefreshFloorMs;
     // Injectable for tests (mirrors Prober's probeFn); defaults to the real
@@ -108,6 +113,14 @@ export class AccountManager {
     this._refreshFn = refreshFn;
     this.accounts = accounts.map((acct, index) => makeAccount(acct, index));
     this.currentIndex = 0;
+    // Sticky pointer per model lane (governing weekly bucket → account index).
+    // currentIndex remains the default lane; family lanes (Fable/Sonnet) keep
+    // their own pointer so a model-scoped switch never drags other traffic along.
+    this.lanes = new Map();
+    // An account whose governing weekly bucket resets within this window jumps
+    // the queue: whatever headroom it has left is wiped at the reset, and its 5h
+    // windows cap how fast it can burn, so it must start early to capture it.
+    this.rescueMs = rescueHours * 60 * 60 * 1000;
     // Session awareness (issue #109). The tracker is always on (passive — it just
     // observes the x-claude-code-session-id header for the status readout).
     // `distributeSessions` gates the behavioural change: keep each session on its
@@ -238,9 +251,9 @@ export class AccountManager {
     // session reset made a sooner-expiring account the better choice. This runs
     // on every request so the behaviour holds without the TUI render loop.
     this.refreshExpiredQuotas();
-    // Session-affinity distribution (opt-in): keep a session on its pinned
-    // account for cache reuse, and route a new session to the least-loaded
-    // account. Only when enabled, only for a real session, and only outside a
+    // Session-affinity distribution (on by default): keep a session on its pinned
+    // account for cache reuse, and place a new session by the shared ranking.
+    // Only when enabled, only for a real session, and only outside a
     // manual route pin (which must still win). Falls through to the normal walk
     // if nothing session-eligible is found (e.g. the whole tier is exhausted).
     if (this.distributeSessions && sessionId && !this._pinnedAccountForModel(model, advisorModel)) {
@@ -259,17 +272,29 @@ export class AccountManager {
     return this._select(exclude, model, null, true);
   }
 
-  /** The selection walk getActiveAccount runs: manual pin → current account →
-   * best-available. `allowProbe` gates the exhausted-fleet probe fallback so the
-   * advisor-constrained pass can fail soft (degrade to executor-only) instead of
-   * burning the throttled probe slot on the stricter constraint. */
+  _laneIndex(model) {
+    const key = this._weeklyBucketFor(model);
+    return key === 'unified7d' ? this.currentIndex : (this.lanes.get(key) ?? this.currentIndex);
+  }
+
+  _setLaneIndex(model, index) {
+    const key = this._weeklyBucketFor(model);
+    if (key === 'unified7d') this.currentIndex = index;
+    else this.lanes.set(key, index);
+  }
+
+  /** The selection walk getActiveAccount runs: manual pin → the lane's current
+   * account → best-available. `allowProbe` gates the exhausted-fleet probe
+   * fallback so the advisor-constrained pass can fail soft (degrade to
+   * executor-only) instead of burning the throttled probe slot on the stricter
+   * constraint. */
   _select(exclude, model, advisorModel, allowProbe) {
     // A manual per-route pin biases selection for that route's models (independent
-    // of the global currentIndex). Honored only while eligible — otherwise we fall
+    // of the lane pointer). Honored only while eligible — otherwise we fall
     // through to normal best-available selection so requests keep flowing.
     const pinned = this._pinnedAccountForModel(model, advisorModel);
     if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinned.index)) return pinned;
-    const current = this.accounts[this.currentIndex];
+    const current = this.accounts[this._laneIndex(model)];
     // `model` scopes availability: an account whose Fable weekly bucket is spent
     // is still fully usable for other models, so it is only excluded when THIS
     // request targets Fable (see _isAvailable).
@@ -289,11 +314,13 @@ export class AccountManager {
     if (this._isAvailable(current, model, advisorModel) && !exclude?.has(current.index)) {
       // A strictly higher-priority (lower value) available account preempts a
       // healthy current one. Within the same priority tier we stay put, so the
-      // common case (all accounts at the default priority 0) is unchanged and
-      // never thrashes — preemption only triggers when priorities differ.
+      // common case (all accounts at the default priority 0) never thrashes —
+      // preemption only triggers when priorities differ. Everything else
+      // (deadlines, rescue, load) only decides where a switch LANDS, because a
+      // move costs the sessions on this account their whole prompt cache.
       const betterExists = this.accounts.some(account =>
         this._isAvailable(account, model, advisorModel) && !exclude?.has(account.index)
-        && this.outranks(account, current, model, advisorModel));
+        && this.outranks(account, current));
       return betterExists ? this._selectNext(exclude, model, advisorModel) : current;
     }
     const next = this._selectNext(exclude, model, advisorModel);
@@ -306,62 +333,26 @@ export class AccountManager {
     return allowProbe ? this._selectProbe(exclude, model) : null;
   }
 
-  /** Session-affinity selection (opt-in, issue #109). Honor a known session's
+  /** Session-affinity selection (issue #109, on by default). Honor a known session's
    * pin when that account is still eligible and not preempted by a
-   * higher-priority one; otherwise route the session to the least-loaded
-   * eligible account. Returns null if nothing is eligible, so the caller falls
-   * back to the normal quota-driven walk. Does NOT record the pin — that happens
-   * on the actual route (recordSession), so retries/failover re-pin naturally. */
+   * higher-priority one; otherwise place the session by the shared ranking.
+   * Returns null if nothing is eligible, so the caller falls back to the normal
+   * quota-driven walk. Does NOT record the pin — that happens on the actual
+   * route (recordSession), so retries/failover re-pin naturally. */
   _selectForSession(sessionId, exclude, model, advisorModel) {
     const pinIdx = this.sessionTracker.pinnedAccount(sessionId);
     if (pinIdx != null) {
       const pinned = this.accounts[pinIdx];
       if (pinned && this._isAvailable(pinned, model, advisorModel) && !exclude?.has(pinIdx)) {
-        // Mirror _select's priority preemption so an operator's priority order
-        // still wins over a session's stickiness.
+        // Only operator priority outranks a session's stickiness — a re-route
+        // costs the session its prompt cache, so nothing softer justifies it.
         const betterExists = this.accounts.some(account =>
           this._isAvailable(account, model, advisorModel) && !exclude?.has(account.index)
-          && this.outranks(account, pinned, model, advisorModel));
+          && this.outranks(account, pinned));
         if (!betterExists) return pinned;
       }
     }
-    return this._pickLeastLoaded(exclude, model, advisorModel);
-  }
-
-  /** Best-available biased toward the fewest active sessions, so new sessions
-   * spread across equal-priority accounts instead of funnelling onto one. Order:
-   * priority → fewest active sessions → fewest in-flight → soonest weekly reset
-   * (the existing tiebreak). */
-  _pickLeastLoaded(exclude = null, model = null, advisorModel = null) {
-    const now = Date.now();
-    let best = null;
-    let bestPriority = Infinity;
-    let bestFlexibility = Infinity;
-    let bestSessions = Infinity;
-    let bestInFlight = Infinity;
-    let bestReset = Infinity;
-    for (const account of this.accounts) {
-      if (exclude?.has(account.index)) continue;
-      if (!this._isAvailable(account, model, advisorModel)) continue;
-      const priority = account.priority || 0;
-      const flexibility = this.flexibility(account, model, advisorModel);
-      const sessions = this.sessionTracker.activeCountFor(account.index, now);
-      const inFlight = account.inFlight || 0;
-      const reset = this._governingWeeklyReset(account, model) || -Infinity;
-      if (priority < bestPriority
-        || (priority === bestPriority && flexibility < bestFlexibility)
-        || (priority === bestPriority && flexibility === bestFlexibility && sessions < bestSessions)
-        || (priority === bestPriority && flexibility === bestFlexibility && sessions === bestSessions && inFlight < bestInFlight)
-        || (priority === bestPriority && flexibility === bestFlexibility && sessions === bestSessions && inFlight === bestInFlight && reset < bestReset)) {
-        best = account;
-        bestPriority = priority;
-        bestFlexibility = flexibility;
-        bestSessions = sessions;
-        bestInFlight = inFlight;
-        bestReset = reset;
-      }
-    }
-    return best;
+    return this._pickBest(exclude, model, advisorModel);
   }
 
   /** Record that a session's request was served by an account (always on, even
@@ -415,15 +406,15 @@ export class AccountManager {
   previewRouteIndex(model) {
     const pinned = this._pinnedAccountForModel(model);
     if (pinned && this._isAvailable(pinned, model)) return pinned.index;
-    const current = this.accounts[this.currentIndex];
+    const current = this.accounts[this._laneIndex(model)];
     if (current && this._isAvailable(current, model)) {
       // Mirror getActiveAccount's priority preemption: a strictly higher-priority
       // available account wins over a healthy current one; same tier stays put.
       const better = this.accounts.some(account =>
-        this._isAvailable(account, model) && this.outranks(account, current, model));
+        this._isAvailable(account, model) && this.outranks(account, current));
       if (!better) return current.index;
     }
-    const best = this._pickBestAvailable(null, model);
+    const best = this._pickBest(null, model);
     return best ? best.index : null;
   }
 
@@ -447,18 +438,56 @@ export class AccountManager {
     return true;
   }
 
+  /** How many OTHER model-family buckets this account can still serve. An
+   * unknown bucket counts as flexible — unknown is not exhausted. Used only as
+   * a final tiebreak (spend one-trick accounts first, keep the do-everything
+   * account as the deep fallback) and by the warmer's ordering. */
   flexibility(account, model = null, advisorModel = null) {
     const governing = new Set([this._weeklyBucketFor(model)]);
     if (advisorModel) governing.add(this._weeklyBucketFor(advisorModel));
     return Object.values(FAMILY_WEEKLY_BUCKETS).filter(bucket =>
-      !governing.has(bucket) && account.quota[bucket] != null && account.quota[bucket] < this.switchThreshold).length;
+      !governing.has(bucket) && (account.quota[bucket] == null || account.quota[bucket] < this.switchThreshold)).length;
   }
 
-  outranks(account, current, model = null, advisorModel = null) {
-    const priority = account.priority || 0;
-    const currentPriority = current.priority || 0;
-    return priority < currentPriority
-      || (priority === currentPriority && this.flexibility(account, model, advisorModel) < this.flexibility(current, model, advisorModel));
+  /** Preemption is priority-only: nothing softer than an operator's explicit
+   * order justifies moving traffic off a working account (a move costs its
+   * sessions their whole prompt cache). */
+  outranks(account, current) {
+    return (account.priority || 0) < (current.priority || 0);
+  }
+
+  /** The soonest future reset among this account's running clocks — the 5h
+   * window and the weekly bucket governing `model`. A reset refunds only what
+   * was spent, so the account closest to a rollover is the one to burn.
+   * Infinity when no clock is running: a cold account is full on demand and
+   * belongs at the back of the queue. */
+  _deadline(account, model, now = Date.now()) {
+    const q = account.quota;
+    const resets = [q.unified5hReset, this._governingWeeklyReset(account, model)].filter(t => t && t > now);
+    return resets.length ? Math.min(...resets) : Infinity;
+  }
+
+  /** True when the governing weekly bucket resets within the rescue window —
+   * its remaining headroom is now-or-never and the 5h windows cap how fast it
+   * can be burned, so the account jumps the queue until it caps. */
+  _isRescue(account, model, now = Date.now()) {
+    const reset = this._governingWeeklyReset(account, model);
+    return !!(reset && reset > now && reset - now < this.rescueMs);
+  }
+
+  /** The one selection order, lowest wins: operator priority → rescue →
+   * soonest deadline (earliest-deadline-first) → fewest active sessions →
+   * fewest in-flight → least flexibility. */
+  _rank(account, model, advisorModel) {
+    const now = Date.now();
+    return [
+      account.priority || 0,
+      this._isRescue(account, model, now) ? 0 : 1,
+      this._deadline(account, model, now),
+      this.sessionTracker.activeCountFor(account.index, now),
+      account.inFlight || 0,
+      this.flexibility(account, model, advisorModel),
+    ];
   }
 
   /** Highest utilization across the quota dimensions that govern `model` (0-1),
@@ -548,7 +577,7 @@ export class AccountManager {
     if (!best) return null;
 
     this._nextProbeAt = now + this.probeIntervalMs;
-    this.currentIndex = best.index;
+    this._setLaneIndex(model, best.index);
     this._beginRamp(best);
     if (best.status === 'throttled') {
       console.log(`[TeamClaude] All accounts unavailable — revalidating throttled "${best.name}" with a live request`);
@@ -836,41 +865,24 @@ export class AccountManager {
       if (r.changed) changed = true;
       if (r.session) sessionReset.push(account);
     }
-    if (sessionReset.length) this._switchOnSessionReset(sessionReset);
+    if (sessionReset.length) this._switchOnSessionReset();
     return changed;
   }
 
   /**
-   * Given accounts whose session quota just reset, switch to the one whose
-   * weekly limit expires soonest — but only if that is sooner than the current
-   * account's weekly limit and the account still has weekly quota to spend.
+   * A 5h rollover is the natural rotation boundary: re-pick the default lane by
+   * the shared ranking. The account that just reset has no running clocks, so
+   * it drops to the back of the queue and the next-soonest deadline takes the
+   * front. Pinned sessions are untouched — only new/unpinned traffic moves.
    */
-  _switchOnSessionReset(candidates) {
+  _switchOnSessionReset() {
     const current = this.accounts[this.currentIndex];
-    // Need a known weekly reset on the current account to compare against;
-    // if it is unknown we are still probing it, so leave it alone.
-    if (!current || current.quota.unified7dReset == null) return;
-
-    let best = null;
-    let bestWeekly = current.quota.unified7dReset;
-    for (const acc of candidates) {
-      if (acc.index === this.currentIndex) continue;
-      if (!this._isAvailable(acc)) continue; // enough session & weekly quota left
-      // Don't demote to a lower-priority (higher value) account on a reset.
-      if ((acc.priority || 0) > (current.priority || 0)) continue;
-      const weekly = acc.quota.unified7dReset;
-      if (weekly == null) continue; // need a known weekly to compare
-      if (weekly < bestWeekly) {
-        bestWeekly = weekly;
-        best = acc;
-      }
-    }
-
-    if (best) {
-      this.currentIndex = best.index;
-      this._beginRamp(best);
-      console.log(`[TeamClaude] Account "${best.name}" session quota reset and weekly expires sooner — switching to it`);
-    }
+    const best = this._pickBest();
+    if (!best || best.index === this.currentIndex) return;
+    if (current && this.outranks(current, best)) return;
+    this.currentIndex = best.index;
+    this._beginRamp(best);
+    console.log(`[TeamClaude] 5h window rolled over — front of the queue is now "${best.name}"`);
   }
 
   _isNearQuota(account, model = null) {
@@ -902,46 +914,16 @@ export class AccountManager {
     return false;
   }
 
-  /**
-   * Pick the best available account by selection order, WITHOUT mutating state:
-   *   1. lowest `priority` value (operator-controlled; default 0, lower = preferred)
-   *   2. then the account with no known weekly limit — using it lets us
-   *      discover its quota
-   *   3. then the account whose weekly limit expires soonest: that quota is
-   *      closest to refreshing, so spending it first preserves accounts whose
-   *      weekly window resets further out.
-   * With all priorities at the default 0, this reduces to the weekly-reset
-   * heuristic. Returns the account or null if none are available.
-   */
-  _pickBestAvailable(exclude = null, model = null, advisorModel = null) {
+  /** The best available account by _rank, WITHOUT mutating state. Returns the
+   * account or null if none are available. */
+  _pickBest(exclude = null, model = null, advisorModel = null) {
     let best = null;
-    let bestPriority = Infinity;
-    let bestFlexibility = Infinity;
-    let bestReset = Infinity;
-
-    for (let i = 0; i < this.accounts.length; i++) {
-      const account = this.accounts[i];
+    let bestRank = null;
+    for (const account of this.accounts) {
       if (exclude?.has(account.index)) continue;
-      // _isAvailable filters out accounts at/above the switch threshold, so the
-      // soonest-expiring pick only ever lands on an account whose 5-hour quota
-      // is still below 98%.
       if (!this._isAvailable(account, model, advisorModel)) continue;
-
-      const priority = account.priority || 0;
-      const flexibility = this.flexibility(account, model, advisorModel);
-      // Rank by the reset of the weekly bucket that governs THIS model (Fable and
-      // Sonnet have their own), so a Fable request spends the account whose Fable
-      // window refreshes soonest while preserving accounts that reset later for
-      // Opus/Sonnet. Unknown reset sorts first so we probe and fill it in.
-      const weeklyReset = this._governingWeeklyReset(account, model) || -Infinity;
-      if (priority < bestPriority
-          || (priority === bestPriority && flexibility < bestFlexibility)
-          || (priority === bestPriority && flexibility === bestFlexibility && weeklyReset < bestReset)) {
-        bestPriority = priority;
-        bestFlexibility = flexibility;
-        bestReset = weeklyReset;
-        best = account;
-      }
+      const rank = this._rank(account, model, advisorModel);
+      if (!best || rankLess(rank, bestRank)) { best = account; bestRank = rank; }
     }
     return best;
   }
@@ -955,7 +937,7 @@ export class AccountManager {
    */
   selectActiveAccount() {
     this.refreshExpiredQuotas(); // drop any restored windows that already expired
-    const best = this._pickBestAvailable();
+    const best = this._pickBest();
     if (!best) return this.accounts[this.currentIndex] || null;
     this.currentIndex = best.index;
     this._beginRamp(best);
@@ -968,10 +950,10 @@ export class AccountManager {
   }
 
   _selectNext(exclude = null, model = null, advisorModel = null) {
-    const best = this._pickBestAvailable(exclude, model, advisorModel);
+    const best = this._pickBest(exclude, model, advisorModel);
     if (best) {
-      const switched = best.index !== this.currentIndex;
-      this.currentIndex = best.index;
+      const switched = best.index !== this._laneIndex(model);
+      this._setLaneIndex(model, best.index);
       // If we switched to an account whose weekly quota is still unknown, flag
       // it so we re-evaluate once that quota is learned (see updateQuota).
       best.probing = best.quota.unified7dReset == null;
@@ -1011,7 +993,7 @@ export class AccountManager {
     if (soonestAccount && soonestTime <= Date.now()) {
       soonestAccount.status = 'active';
       soonestAccount.rateLimitedUntil = null;
-      this.currentIndex = soonestAccount.index;
+      this._setLaneIndex(model, soonestAccount.index);
       this._beginRamp(soonestAccount);
       console.log(`[TeamClaude] Account "${soonestAccount.name}" reset, switching to it`);
       return soonestAccount;
@@ -1150,6 +1132,23 @@ export class AccountManager {
   }
 
   /**
+   * A quota-rejected 429 not explained by the 5h/7d/Fable status headers (e.g.
+   * a spent Sonnet weekly, which only the probe can see coming): mark the
+   * request's family bucket spent until the given retry-after so selection
+   * skips this account for that family only. A family with no bucket of its
+   * own shares unified7d, so the whole account is held instead.
+   */
+  markModelWeeklyExhausted(accountIndex, model, retryAfterSeconds) {
+    const account = this.accounts[accountIndex];
+    if (!account) return;
+    const key = this._weeklyBucketFor(model);
+    if (key === 'unified7d') return this.markRateLimited(accountIndex, retryAfterSeconds);
+    account.quota[key] = 1;
+    account.quota[`${key}Reset`] = account.quota[`${key}Reset`] || Date.now() + retryAfterSeconds * 1000;
+    console.log(`[TeamClaude] Account "${account.name}" rejected on the ${key} bucket — skipping it for that family`);
+  }
+
+  /**
    * Mark an account as rate-limited for a given duration.
    */
   markRateLimited(accountIndex, retryAfterSeconds) {
@@ -1285,11 +1284,15 @@ export class AccountManager {
     } else if (this.currentIndex > index) {
       this.currentIndex--;
     }
-    // Keep route pins pointing at the right account after the index shift: drop a
-    // pin on the removed account, decrement pins that sat above it.
+    // Keep route pins and lane pointers on the right account after the index
+    // shift: drop entries on the removed account, decrement ones that sat above.
     for (const [name, idx] of [...this.routePins.entries()]) {
       if (idx === index) this.routePins.delete(name);
       else if (idx > index) this.routePins.set(name, idx - 1);
+    }
+    for (const [key, idx] of [...this.lanes.entries()]) {
+      if (idx === index) this.lanes.delete(key);
+      else if (idx > index) this.lanes.set(key, idx - 1);
     }
   }
 

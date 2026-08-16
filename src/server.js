@@ -840,13 +840,21 @@ export async function forwardRequest(req, res, body, accountManager, upstream, r
       const generalRejected = rl['anthropic-ratelimit-unified-5h-status'] === 'rejected'
         || rl['anthropic-ratelimit-unified-7d-status'] === 'rejected';
       const fableRejected = rl['anthropic-ratelimit-unified-7d_oi-status'] === 'rejected' && !generalRejected;
-      if ((generalRejected || fableRejected) && retryCount < maxRetries) {
-        // A Fable-only rejection leaves the account fine for other models, so we
-        // do NOT throttle it globally — the recorded Fable utilization makes
-        // selection skip it for Fable requests only. A general rejection spends a
-        // shared bucket, so hold the whole account for its reset window.
+      // A rejection none of the known bucket headers explain (e.g. a spent
+      // Sonnet weekly, only visible to the probe): still a spent bucket, so
+      // waiting on this account is futile — record it against the request's
+      // family bucket and rotate, exactly like a Fable rejection.
+      const otherRejected = rl['anthropic-ratelimit-unified-status'] === 'rejected'
+        && !generalRejected && !fableRejected;
+      if ((generalRejected || fableRejected || otherRejected) && retryCount < maxRetries) {
+        // A family-only rejection leaves the account fine for other models, so we
+        // do NOT throttle it globally — the recorded utilization makes selection
+        // skip it for that family only. A general rejection spends a shared
+        // bucket, so hold the whole account for its reset window.
         if (fableRejected) {
           console.log(`[TeamClaude] Fable weekly exhausted on "${account.name}" — switching account for this Fable request`);
+        } else if (otherRejected) {
+          accountManager.markModelWeeklyExhausted(account.index, ctx.model, Math.min(Math.max(retryAfter, 1), 3600));
         } else {
           const hold = Math.min(Math.max(retryAfter, 1), 3600);
           console.log(`[TeamClaude] Quota rejection (429) on "${account.name}" — throttling ${hold}s and switching account`);
@@ -1197,10 +1205,10 @@ export function rewriteModel(body, modelMap) {
 function computeRetryAfter(accounts) {
   let soonest = Infinity;
   for (const acct of accounts) {
-    const reset = acct.rateLimitedUntil || acct.quota.resetsAt;
-    if (reset) {
+    for (const reset of [acct.rateLimitedUntil, acct.quota.resetsAt, acct.quota.unified5hReset, acct.quota.unified7dReset]) {
+      if (!reset) continue;
       const ms = new Date(reset).getTime() - Date.now();
-      if (ms < soonest) soonest = ms;
+      if (ms > 0 && ms < soonest) soonest = ms;
     }
   }
   return soonest === Infinity ? 60 : Math.max(1, Math.ceil(soonest / 1000));

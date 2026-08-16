@@ -16,9 +16,17 @@ How TeamClaude decides which account serves a request, and what it does when tha
 
 ## Choosing an account
 
-TeamClaude stays on the current account while it remains the best choice. A higher-priority account or an equally ranked account with less spare model-family capacity can take over before the current account reaches `switchThreshold` (default `0.98`).
+TeamClaude stays on the current account until it can't serve the request (a bucket at `switchThreshold`, default `0.98`, or a quota-rejected 429). Only a strictly higher-priority account preempts a working one — nothing softer moves live traffic, because every move costs the sessions on that account their prompt cache. Each model lane (default, Fable, Sonnet) keeps its **own** current account, so a Fable request switching accounts never drags other traffic along.
 
-Ranking is: lowest `priority` number first, then least flexibility, then the governing weekly bucket that resets soonest. Flexibility is the number of other model-family buckets the account can still serve. This spends less flexible accounts first: an account with no Fable quota left serves Opus before an account that can still serve both Opus and Fable. The more flexible account remains a fallback if the preferred accounts become unavailable. A model with its own weekly bucket (Fable, Sonnet) is ranked by that bucket rather than the shared one. Set an explicit order with `teamclaude priority <name> <n>`, or `--first` / `--last`.
+When a switch or a new placement does happen, accounts are ranked by expiry date — a reset refunds only what was spent, so the account closest to a rollover is the one to burn:
+
+1. lowest `priority` number (set with `teamclaude priority <name> <n>`, or `--first` / `--last`)
+2. **rescue**: an account whose governing weekly bucket resets within `rescueHours` (default 24) jumps the queue — its remaining headroom is now-or-never, and its 5h windows cap how fast it can burn
+3. soonest deadline: the nearest future reset among the account's running clocks (5h window, governing weekly bucket). Cold accounts sort last — they're full on demand
+4. fewest active sessions, then fewest in-flight requests
+5. least flexibility (the number of other model-family buckets the account can still serve) — spend one-trick accounts first, keep the do-everything account as the deep fallback
+
+A model with its own weekly bucket (Fable, Sonnet) is ranked by that bucket rather than the shared one. When a 5h window rolls over, the default lane re-picks by the same ranking: the refreshed account goes to the back of the queue and the next-soonest deadline takes the front — rotation happens at rollovers, which is exactly when it's cheapest.
 
 ## The two kinds of 429
 
@@ -97,7 +105,7 @@ Default rotation is purely quota-driven, so many parallel sessions all pile onto
 "distributeSessions": true
 ```
 
-When on, TeamClaude routes each **new** session to the least-loaded eligible account (fewest active sessions, then fewest in-flight) and **pins** it there, so a session keeps hitting the same account and preserves its prompt cache — while different sessions spread across accounts instead of funnelling onto one. Account **priority still wins** (a higher-priority account is never skipped to balance load), and a session whose account becomes exhausted re-routes automatically. Off by default; single-session use is unaffected either way.
+When on, TeamClaude places each **new** session by the ranking above (rescue and expiry date first, then load) and **pins** it there, so a session keeps hitting the same account and preserves its prompt cache — while its account's rollovers and caps rotate *new* sessions onto the next account in the queue. Account **priority still wins** (a higher-priority account is never skipped to balance load), and a session whose account becomes exhausted re-routes automatically. **On by default** (set `"distributeSessions": false` to funnel everything through one account); single-session use is unaffected either way.
 
 ## Pin a session to one account
 
